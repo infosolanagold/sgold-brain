@@ -1,127 +1,82 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-import requests # L'outil pour parler à la Blockchain
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import requests
 
-app = FastAPI()
+app = Flask(__name__)
+# IMPORTANT : Cela permet à ton site Wix de communiquer avec ce serveur
+CORS(app)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+@app.route('/', methods=['GET'])
+def home():
+    return "Solana Gold Guard AI is ONLINE 🟢"
 
-class TokenRequest(BaseModel):
-    address: str
-
-# URL Publique de Solana (Pour commencer)
-# Note: Pour une version Pro, on utilisera une clé Helius ici plus tard.
-SOLANA_RPC_URL = "https://api.mainnet-beta.solana.com"
-
-KNOWN_SCAMS = ["ScamTokenAddress", "Honeypot123"]
-
-def get_onchain_data(token_address):
-    """
-    Interroge la VRAIE Blockchain Solana.
-    """
-    payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "getAccountInfo",
-        "params": [
-            token_address,
-            {"encoding": "jsonParsed"}
-        ]
-    }
-    
+@app.route('/scan', methods=['POST'])
+def scan_token():
     try:
-        response = requests.post(SOLANA_RPC_URL, json=payload, timeout=5)
-        data = response.json()
+        # 1. Récupérer l'adresse envoyée par le site
+        data = request.json
+        token_address = data.get('address')
+
+        if not token_address:
+            return jsonify({"risk": "ERROR", "score": 0, "summary": "Adresse manquante."}), 400
+
+        print(f"🔍 Scanning: {token_address}")
+
+        # 2. Interroger l'API RugCheck (Version Summary pour la rapidité)
+        rugcheck_url = f"https://api.rugcheck.xyz/v1/tokens/{token_address}/report/summary"
         
-        # Si le token n'existe pas
-        if "result" not in data or data["result"]["value"] is None:
-            return None
-            
-        # On récupère les infos techniques
-        info = data["result"]["value"]["data"]["parsed"]["info"]
-        return info
+        # On met un timeout de 10s pour ne pas faire planter le serveur si RugCheck est lent
+        response = requests.get(rugcheck_url, timeout=10)
+
+        # Si le token est inconnu ou trop récent
+        if response.status_code != 200:
+            return jsonify({
+                "risk": "UNKNOWN", 
+                "score": 0, 
+                "summary": "Token introuvable ou trop récent sur la blockchain. Soyez prudent."
+            })
+
+        rc_data = response.json()
+
+        # 3. Calcul du Score (Conversion Logique 10M MC)
+        # RugCheck donne un score de DANGER (ex: 5000). On veut un score de SÉCURITÉ (0-100).
+        danger_score = rc_data.get('score', 0)
+        
+        # Formule : 100 - (Danger / 100). On garde le résultat entre 0 et 100.
+        safety_score = max(0, min(100, 100 - int(danger_score / 100)))
+
+        # 4. Définition du Label (Vert / Orange / Rouge)
+        risk_label = "SAFE"
+        if safety_score < 50:
+            risk_label = "CRITICAL" # Rouge
+        elif safety_score < 80:
+            risk_label = "WARNING"  # Orange
+
+        # 5. Création du Résumé (Summary) pour le Dashboard
+        risks_list = rc_data.get('risks', [])
+        
+        if not risks_list:
+            summary = "Analyse terminée : Liquidité verrouillée, Mint désactivé. Aucun risque majeur détecté."
+        else:
+            # On prend le risque le plus critique pour l'afficher
+            top_risk = risks_list[0].get('name', 'Risque détecté')
+            summary = f"ALERTE SÉCURITÉ : {top_risk}. Une inspection manuelle est recommandée."
+
+        # 6. Envoi de la réponse au site
+        return jsonify({
+            "score": safety_score,
+            "risk": risk_label,
+            "summary": summary
+        })
+
     except Exception as e:
-        print(f"Error fetching data: {e}")
-        return None
+        print(f"❌ Erreur interne : {e}")
+        return jsonify({
+            "risk": "ERROR", 
+            "score": 0, 
+            "summary": "Erreur de connexion au noeud neuronal. Veuillez réessayer."
+        }), 500
 
-def analyze_risk(address):
-    # 1. Check Blacklist (Toujours actif)
-    if address in KNOWN_SCAMS:
-        return {
-            "score": 0, "risk": "CRITICAL",
-            "checks": [{"name": "DATABASE", "status": "BLACKLISTED", "safe": False}],
-            "summary": "DANGER: Address identified in Global Blacklist."
-        }
-
-    # 2. Récupération des données RÉELLES (Live)
-    token_data = get_onchain_data(address)
-    
-    if not token_data:
-        # Si on ne trouve pas le token sur la blockchain
-        return {
-            "score": 0, "risk": "UNKNOWN",
-            "checks": [],
-            "summary": "Error: Token not found on Solana Mainnet. Check the address."
-        }
-
-    # 3. Analyse des Vraies Données
-    # Est-ce que le Mint est désactivé ? (Mint Authority doit être null)
-    mint_auth = token_data.get("mintAuthority")
-    mint_safe = (mint_auth is None)
-
-    # Est-ce que le Freeze est désactivé ? (Freeze Authority doit être null)
-    freeze_auth = token_data.get("freezeAuthority")
-    freeze_safe = (freeze_auth is None)
-
-    checks = []
-    checks.append({
-        "name": "MINT AUTH", 
-        "status": "REVOKED ✅" if mint_safe else "ACTIVE ⚠️", 
-        "safe": mint_safe
-    })
-    checks.append({
-        "name": "FREEZE AUTH", 
-        "status": "REVOKED ✅" if freeze_safe else "ACTIVE ⚠️", 
-        "safe": freeze_safe
-    })
-
-    # Calcul du Score Réel
-    score = 100
-    if not mint_safe: score -= 50 # Très dangereux
-    if not freeze_safe: score -= 30 # Dangereux
-
-    risk_level = "LOW"
-    if score < 50: risk_level = "CRITICAL"
-    elif score < 90: risk_level = "MEDIUM"
-
-    # Résumé intelligent
-    summary = "SAFE: Contract is renounced and immutable."
-    if not mint_safe: summary = "DANGER: Developer can mint unlimited tokens (Rug Pull Risk)."
-    elif not freeze_safe: summary = "WARNING: Developer can freeze wallets (Honeypot Risk)."
-
-    return {
-        "score": score,
-        "risk": risk_level,
-        "checks": checks,
-        "summary": summary
-    }
-
-@app.get("/")
-def read_root():
-    return {"status": "Solana Gold Guard AI (REAL DATA) is Online"}
-
-@app.post("/scan")
-def scan_token(request: TokenRequest):
-    clean_address = request.address.strip()
-    if len(clean_address) < 10:
-        raise HTTPException(status_code=400, detail="Invalid address")
-    
-    result = analyze_risk(clean_address)
-    return result
+if __name__ == '__main__':
+    # Port 10000 est standard pour Render
+    app.run(host='0.0.0.0', port=10000)
