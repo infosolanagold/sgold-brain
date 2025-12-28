@@ -3,66 +3,66 @@ from flask_cors import CORS
 import requests
 
 app = Flask(__name__)
-# IMPORTANT : Cela permet à ton site Wix de communiquer avec ce serveur
+# Enable CORS to allow your Wix site to talk to this brain
 CORS(app)
 
 @app.route('/', methods=['GET'])
 def home():
-    return "Solana Gold Guard AI is ONLINE 🟢"
+    return "Solana Gold Guard AI is ONLINE (English Mode) 🟢"
 
 @app.route('/scan', methods=['POST'])
 def scan_token():
     try:
-        # 1. Récupérer l'adresse envoyée par le site
+        # 1. Get address from frontend
         data = request.json
         token_address = data.get('address')
 
         if not token_address:
-            return jsonify({"risk": "ERROR", "score": 0, "summary": "Adresse manquante."}), 400
+            return jsonify({"risk": "ERROR", "score": 0, "summary": "No address provided."}), 400
 
         print(f"🔍 Scanning: {token_address}")
 
-        # 2. Interroger l'API RugCheck (Version Summary pour la rapidité)
+        # 2. Query RugCheck API
         rugcheck_url = f"https://api.rugcheck.xyz/v1/tokens/{token_address}/report/summary"
         
-        # On met un timeout de 10s pour ne pas faire planter le serveur si RugCheck est lent
+        # 10s timeout to prevent hanging
         response = requests.get(rugcheck_url, timeout=10)
 
-        # Si le token est inconnu ou trop récent
+        # If token is unknown or too new
         if response.status_code != 200:
             return jsonify({
                 "risk": "UNKNOWN", 
                 "score": 0, 
-                "summary": "Token introuvable ou trop récent sur la blockchain. Soyez prudent."
+                "summary": "Token not found or too new on chain. High caution advised."
             })
 
         rc_data = response.json()
 
-        # 3. Calcul du Score (Conversion Logique 10M MC)
-        # RugCheck donne un score de DANGER (ex: 5000). On veut un score de SÉCURITÉ (0-100).
+        # 3. Calculate Security Score (10M MC Logic)
+        # RugCheck gives a Danger score. We convert to Safety Score (0-100).
         danger_score = rc_data.get('score', 0)
         
-        # Formule : 100 - (Danger / 100). On garde le résultat entre 0 et 100.
+        # Formula: 100 - (Danger / 100). Clamped between 0 and 100.
         safety_score = max(0, min(100, 100 - int(danger_score / 100)))
 
-        # 4. Définition du Label (Vert / Orange / Rouge)
+        # 4. Define Risk Label
         risk_label = "SAFE"
         if safety_score < 50:
-            risk_label = "CRITICAL" # Rouge
+            risk_label = "CRITICAL" # Red
         elif safety_score < 80:
             risk_label = "WARNING"  # Orange
 
-        # 5. Création du Résumé (Summary) pour le Dashboard
+        # 5. Generate English Summary
         risks_list = rc_data.get('risks', [])
         
         if not risks_list:
-            summary = "Analyse terminée : Liquidité verrouillée, Mint désactivé. Aucun risque majeur détecté."
+            summary = "Clean Analysis: Liquidity locked, Mint disabled. No major risks detected."
         else:
-            # On prend le risque le plus critique pour l'afficher
-            top_risk = risks_list[0].get('name', 'Risque détecté')
-            summary = f"ALERTE SÉCURITÉ : {top_risk}. Une inspection manuelle est recommandée."
+            # Pick the most critical risk name
+            top_risk = risks_list[0].get('name', 'Potential Risk')
+            summary = f"SECURITY ALERT: {top_risk}. Manual inspection recommended."
 
-        # 6. Envoi de la réponse au site
+        # 6. Send response to Wix
         return jsonify({
             "score": safety_score,
             "risk": risk_label,
@@ -70,13 +70,12 @@ def scan_token():
         })
 
     except Exception as e:
-        print(f"❌ Erreur interne : {e}")
+        print(f"❌ Internal Error: {e}")
         return jsonify({
             "risk": "ERROR", 
             "score": 0, 
-            "summary": "Erreur de connexion au noeud neuronal. Veuillez réessayer."
+            "summary": "Neural Node connection error. Please try again."
         }), 500
 
 if __name__ == '__main__':
-    # Port 10000 est standard pour Render
     app.run(host='0.0.0.0', port=10000)
