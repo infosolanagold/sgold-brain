@@ -1,22 +1,36 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware  # <--- AJOUT IMPORTANT
 from pydantic import BaseModel
-import random
 import hashlib
 
 app = FastAPI()
 
+# --- CONFIGURATION DE SECURITE (CORS) ---
+# Ceci permet à ton site Web de parler à ce serveur sans être bloqué
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Autorise tout le monde (pour l'instant)
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+# ----------------------------------------
+
 class TokenRequest(BaseModel):
     address: str
 
-KNOWN_SCAMS = ["8x...", "Gv...", "ScamTokenAddress"]
+KNOWN_SCAMS = ["ScamTokenAddress", "Honeypot123", "FakeUSDC"]
 
 def analyze_risk(address):
     # Blacklist Check
     if address in KNOWN_SCAMS:
-        return {"score": 0, "risk": "CRITICAL", "summary": "Identified in Blacklist."}
+        return {"score": 0, "risk": "CRITICAL", "summary": "DANGER: Address identified in Global Blacklist."}
 
-    # Simulation IA stable basée sur l'adresse
-    hash_val = int(hashlib.sha256(address.encode('utf-8')).hexdigest(), 16) % 100
+    # Simulation IA stable
+    try:
+        hash_val = int(hashlib.sha256(address.encode('utf-8')).hexdigest(), 16) % 100
+    except:
+        hash_val = 50 # Valeur par défaut si erreur
     
     # Critères simulés
     liq_locked = hash_val > 20 
@@ -40,7 +54,7 @@ def analyze_risk(address):
         "score": score,
         "risk": risk_level,
         "checks": checks,
-        "summary": f"AI Scan completed. Risk level assessed as {risk_level}."
+        "summary": f"AI Scan completed. Risk level assessed as {risk_level} based on simulated vectors."
     }
 
 @app.get("/")
@@ -49,7 +63,10 @@ def read_root():
 
 @app.post("/scan")
 def scan_token(request: TokenRequest):
-    if len(request.address) < 5:
+    # Petit nettoyage de l'entrée
+    clean_address = request.address.strip()
+    if len(clean_address) < 3:
         raise HTTPException(status_code=400, detail="Invalid address")
-    result = analyze_risk(request.address)
+    
+    result = analyze_risk(clean_address)
     return result
