@@ -1,20 +1,18 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware  # <--- AJOUT IMPORTANT
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import hashlib
 
 app = FastAPI()
 
-# --- CONFIGURATION DE SECURITE (CORS) ---
-# Ceci permet à ton site Web de parler à ce serveur sans être bloqué
+# Configuration CORS (Pour autoriser ton site)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Autorise tout le monde (pour l'instant)
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-# ----------------------------------------
 
 class TokenRequest(BaseModel):
     address: str
@@ -22,17 +20,24 @@ class TokenRequest(BaseModel):
 KNOWN_SCAMS = ["ScamTokenAddress", "Honeypot123", "FakeUSDC"]
 
 def analyze_risk(address):
-    # Blacklist Check
+    # 1. Vérification Blacklist
     if address in KNOWN_SCAMS:
-        return {"score": 0, "risk": "CRITICAL", "summary": "DANGER: Address identified in Global Blacklist."}
+        return {
+            "score": 0,
+            "risk": "CRITICAL",
+            "checks": [
+                {"name": "DATABASE", "status": "BLACKLISTED", "safe": False},
+                {"name": "SAFETY", "status": "COMPROMISED", "safe": False}
+            ],
+            "summary": "DANGER: Address identified in Global Blacklist. Do not interact."
+        }
 
-    # Simulation IA stable
+    # 2. Simulation IA stable
     try:
         hash_val = int(hashlib.sha256(address.encode('utf-8')).hexdigest(), 16) % 100
     except:
-        hash_val = 50 # Valeur par défaut si erreur
+        hash_val = 50 
     
-    # Critères simulés
     liq_locked = hash_val > 20 
     mint_off = hash_val > 30
 
@@ -40,7 +45,6 @@ def analyze_risk(address):
     checks.append({"name": "LIQUIDITY", "status": "LOCKED" if liq_locked else "UNLOCKED", "safe": liq_locked})
     checks.append({"name": "MINT AUTH", "status": "DISABLED" if mint_off else "ENABLED", "safe": mint_off})
 
-    # Score
     score = hash_val
     if not liq_locked: score -= 30
     if not mint_off: score -= 40
@@ -63,7 +67,6 @@ def read_root():
 
 @app.post("/scan")
 def scan_token(request: TokenRequest):
-    # Petit nettoyage de l'entrée
     clean_address = request.address.strip()
     if len(clean_address) < 3:
         raise HTTPException(status_code=400, detail="Invalid address")
