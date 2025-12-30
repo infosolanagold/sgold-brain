@@ -1,60 +1,65 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
-from supabase import create_client, Client
-import os
+import time
 
 app = Flask(__name__)
-# Autorise tout le monde (Wix, Mobile, PC)
+# Autorise tout le monde à se connecter
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-# --- TES CLÉS SUPABASE (CONNECTÉES) ---
-SUPABASE_URL = "https://jbciscdzfnvzpvxqxkcq.supabase.co"
-# Note : Si cette clé ne marche pas, essaie celle qui commence par "ey..." (plus longue)
-SUPABASE_KEY = "sb_publishable_GCxfFIJidoGqIXxyDNFjhQ_RXQwyOP3"
-
-# Connexion à la base de données
-try:
-    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-    print("✅ SUPABASE CONNECTED")
-except Exception as e:
-    print(f"⚠️ Erreur connexion Supabase: {e}")
+# --- MÉMOIRE VIVE (Stocke les rapports tant que le serveur est allumé) ---
+# C'est ici que les rapports des utilisateurs vont arriver
+global_reports = []
 
 @app.route('/', methods=['GET'])
 def home():
-    return "SOLANA GOLD GUARD V2 [DB ACTIVE]"
+    return f"SERVER ONLINE. {len(global_reports)} reports in memory."
 
-# --- 1. RÉCUPÉRER LES RAPPORTS (Pour l'affichage Mobile/PC) ---
-@app.route('/reports', methods=['GET'])
-def get_reports():
-    try:
-        # On récupère les 50 derniers rapports validés
-        response = supabase.table('reports').select("*").eq('status', 'approved').order('created_at', desc=True).limit(50).execute()
-        return jsonify(response.data)
-    except Exception as e:
-        print(f"Erreur Lecture DB: {e}")
-        return jsonify([]), 200 # On renvoie une liste vide pour ne pas faire planter le site
-
-# --- 2. AJOUTER UN RAPPORT (Depuis le formulaire) ---
-@app.route('/reports/add', methods=['POST'])
-def add_report():
+# --- 1. RECEVOIR UN RAPPORT (Depuis le site) ---
+@app.route('/report/submit', methods=['POST'])
+def submit_report():
     try:
         data = request.json
-        # On crée la donnée à envoyer
-        new_row = {
-            "target": data.get('target'),
-            "description": data.get('desc'),
-            "status": "approved", # Auto-approuvé pour la démo
-            "reporter_wallet": data.get('wallet', 'Anonymous')
-        }
-        # Envoi vers Supabase
-        supabase.table('reports').insert(new_row).execute()
-        return jsonify({"status": "success"})
+        # On ajoute un ID unique basé sur l'heure
+        data['id'] = int(time.time() * 1000)
+        data['status'] = 'pending'
+        
+        # On ajoute le rapport en haut de la liste
+        global_reports.insert(0, data)
+        print(f"🚨 Nouveau rapport reçu : {data['target']}")
+        return jsonify({"status": "success", "id": data['id']})
     except Exception as e:
-        print(f"Erreur Écriture DB: {e}")
         return jsonify({"error": str(e)}), 500
 
-# --- 3. LE SCANNER (RUGCHECK) ---
+# --- 2. ENVOYER LES RAPPORTS (Vers ton Admin) ---
+@app.route('/report/list', methods=['GET'])
+def get_reports():
+    return jsonify(global_reports)
+
+# --- 3. ACTIONS ADMIN (Approuver/Supprimer) ---
+@app.route('/report/action', methods=['POST'])
+def action_report():
+    try:
+        req = request.json
+        action = req.get('action') # 'approve' ou 'delete'
+        report_id = req.get('id')
+        
+        global global_reports
+        
+        if action == 'delete':
+            # On garde tout sauf celui qu'on veut supprimer
+            global_reports = [r for r in global_reports if r['id'] != report_id]
+        elif action == 'approve':
+            # On cherche le rapport et on change son statut
+            for r in global_reports:
+                if r['id'] == report_id:
+                    r['status'] = 'approved'
+                    
+        return jsonify({"status": "updated", "current_count": len(global_reports)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# --- 4. LE SCANNER (inchangé, toujours blindé) ---
 @app.route('/scan', methods=['POST'])
 def scan_token():
     try:
@@ -62,32 +67,27 @@ def scan_token():
         token_address = data.get('address')
         if not token_address: return jsonify({"risk": "ERROR", "score": 0, "summary": "No address."}), 400
 
-        # Carte d'identité pour passer les filtres
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        }
-        
+        headers = {"User-Agent": "Mozilla/5.0"}
         rugcheck_url = f"https://api.rugcheck.xyz/v1/tokens/{token_address}/report/summary"
-        response = requests.get(rugcheck_url, headers=headers, timeout=6)
-        
+        response = requests.get(rugcheck_url, headers=headers, timeout=5)
+
         if response.status_code != 200:
-            return jsonify({"score": 0, "risk": "UNKNOWN", "summary": "Token not found or too new."})
+            return jsonify({"score": 0, "risk": "UNKNOWN", "summary": "Token too new."})
 
         rc_data = response.json()
-        danger = rc_data.get('score', 0)
-        safety = max(0, min(100, 100 - int(danger / 100)))
-        
-        risk = "SAFE"
-        if safety < 50: risk = "CRITICAL"
-        elif safety < 80: risk = "WARNING"
-        
+        danger_score = rc_data.get('score', 0)
+        safety_score = max(0, min(100, 100 - int(danger_score / 100)))
+
+        risk_label = "SAFE"
+        if safety_score < 50: risk_label = "CRITICAL"
+        elif safety_score < 80: risk_label = "WARNING"
+
         risks = rc_data.get('risks', [])
-        summary = f"ALERT: {risks[0].get('name', 'Risk Detected')}" if risks else "Clean Analysis: Liquidity locked, Mint disabled."
+        summary = "Clean Analysis." if not risks else f"ALERT: {risks[0].get('name')}."
 
-        return jsonify({"score": safety, "risk": risk, "summary": summary})
+        return jsonify({"score": safety_score, "risk": risk_label, "summary": summary})
 
-    except Exception as e:
-        print(f"Erreur Scan: {e}")
+    except Exception:
         return jsonify({"risk": "ERROR", "score": 0, "summary": "Scan failed."}), 500
 
 if __name__ == '__main__':
