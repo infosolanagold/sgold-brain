@@ -8,7 +8,7 @@ import os
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-DB_FILE = "database.json"
+DB_FILE = "/var/data/database.json"
 
 # --- GESTION PERSISTANCE (Fichier JSON) ---
 def load_db():
