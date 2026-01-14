@@ -15,6 +15,7 @@ DB_FILE = "/var/data/database.json"
 # --- GESTION DE LA BASE DE DONNÉES ---
 def load_db():
     """Charge la base de données depuis le disque dur au démarrage."""
+    # Si le fichier n'existe pas encore (premier démarrage), on retourne une liste vide
     if not os.path.exists(DB_FILE):
         return []
     try:
