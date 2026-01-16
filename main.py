@@ -7,11 +7,19 @@ import os
 from datetime import datetime
 
 app = Flask(__name__)
+# Autorise les requêtes de partout (Wix inclus)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-# --- CONFIGURATION DU DISQUE PERSISTANT ---
-DB_FILE = "/var/data/database.json"
-REF_FILE = "/var/data/referrals.json" # NOUVEAU : Fichier pour les parrainages
+# --- DETECTION INTELLIGENTE DU DISQUE (EVITE LES CRASHS) ---
+if os.path.exists("/var/data"):
+    BASE_PATH = "/var/data"
+    print("✅ DISQUE PERSISTANT DÉTECTÉ.")
+else:
+    BASE_PATH = "."
+    print("⚠️ PAS DE DISQUE DÉTECTÉ. MODE MÉMOIRE TEMPORAIRE.")
+
+DB_FILE = os.path.join(BASE_PATH, "database.json")
+REF_FILE = os.path.join(BASE_PATH, "referrals.json")
 
 # --- GESTION DES FICHIERS ---
 def load_json(filepath):
@@ -28,17 +36,22 @@ def save_json(filepath, data):
         with open(filepath, 'w') as f:
             json.dump(data, f, indent=4) 
     except Exception as e:
-        print(f"ERREUR DISQUE {filepath}: {e}")
+        print(f"❌ ERREUR SAUVEGARDE {filepath}: {e}")
 
 # Charge la mémoire au démarrage
 global_reports = load_json(DB_FILE)
 global_referrals = load_json(REF_FILE)
 
-# --- ROUTES PRINCIPALES ---
+# --- ROUTES ---
 
 @app.route('/', methods=['GET'])
 def home():
-    return f"SERVER ONLINE. DB: {len(global_reports)} reports. REFS: {len(global_referrals)} events."
+    return jsonify({
+        "status": "ONLINE 🟢",
+        "storage": BASE_PATH,
+        "reports": len(global_reports),
+        "referrals": len(global_referrals)
+    }), 200
 
 @app.route('/scan', methods=['POST'])
 def scan_token():
@@ -106,20 +119,28 @@ def action_report():
         return jsonify({"status": "updated"})
     except: return jsonify({"error": "Failed"}), 500
 
-# --- ROUTE REFERRAL (NOUVEAU) ---
+# --- ROUTES REFERRAL ---
+
+# 1. Enregistrer un parrainage (Appelé par le site quand quelqu'un arrive)
 @app.route('/referral/track', methods=['POST'])
 def track_referral():
     try:
         data = request.json
-        # Ajoute la date serveur
         data['server_time'] = datetime.now().isoformat()
         
         global_referrals.append(data)
-        save_json(REF_FILE, global_referrals) # Sauvegarde sur le disque à 7$
+        save_json(REF_FILE, global_referrals)
         
         return jsonify({"status": "tracked"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# 2. Lister les parrainages (NOUVEAU - Pour l'onglet Admin)
+@app.route('/referral/list', methods=['GET'])
+def get_referral_list():
+    return jsonify(global_referrals), 200
+
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=10000)
+    # Utilise le port défini par Render ou 10000 par défaut
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
