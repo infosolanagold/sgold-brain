@@ -7,51 +7,44 @@ import os
 from datetime import datetime
 
 app = Flask(__name__)
-# Autorise les requêtes de partout (Wix inclus)
+# Autorise les requêtes de partout
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-# --- DETECTION INTELLIGENTE DU DISQUE (EVITE LES CRASHS) ---
+# --- SÉCURITÉ ADMIN ---
+# Récupère le mot de passe depuis Render. 
+# Si tu ne le configures pas, le mot de passe par défaut est "SOLANA_ADMIN"
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "SOLANA_ADMIN")
+# On crée un token secret basé sur ce mot de passe
+ADMIN_TOKEN = f"SECURE_SESSION_{hash(ADMIN_PASSWORD)}"
+
+# --- CONFIGURATION FICHIERS ---
 if os.path.exists("/var/data"):
     BASE_PATH = "/var/data"
-    print("✅ DISQUE PERSISTANT DÉTECTÉ.")
 else:
     BASE_PATH = "."
-    print("⚠️ PAS DE DISQUE DÉTECTÉ. MODE MÉMOIRE TEMPORAIRE.")
 
 DB_FILE = os.path.join(BASE_PATH, "database.json")
 REF_FILE = os.path.join(BASE_PATH, "referrals.json")
 
-# --- GESTION DES FICHIERS ---
 def load_json(filepath):
-    if not os.path.exists(filepath):
-        return []
+    if not os.path.exists(filepath): return []
     try:
-        with open(filepath, 'r') as f:
-            return json.load(f)
-    except:
-        return []
+        with open(filepath, 'r') as f: return json.load(f)
+    except: return []
 
 def save_json(filepath, data):
     try:
-        with open(filepath, 'w') as f:
-            json.dump(data, f, indent=4) 
-    except Exception as e:
-        print(f"❌ ERREUR SAUVEGARDE {filepath}: {e}")
+        with open(filepath, 'w') as f: json.dump(data, f, indent=4)
+    except Exception as e: print(f"Error saving {filepath}: {e}")
 
-# Charge la mémoire au démarrage
 global_reports = load_json(DB_FILE)
 global_referrals = load_json(REF_FILE)
 
-# --- ROUTES ---
+# --- ROUTES PUBLIQUES ---
 
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({
-        "status": "ONLINE 🟢",
-        "storage": BASE_PATH,
-        "reports": len(global_reports),
-        "referrals": len(global_referrals)
-    }), 200
+    return jsonify({"status": "ONLINE", "reports": len(global_reports)})
 
 @app.route('/scan', methods=['POST'])
 def scan_token():
@@ -61,24 +54,16 @@ def scan_token():
         if not token_address: return jsonify({"risk": "ERROR", "score": 0}), 400
 
         headers = {"User-Agent": "Mozilla/5.0"}
-        rugcheck_url = f"https://api.rugcheck.xyz/v1/tokens/{token_address}/report/summary"
-        response = requests.get(rugcheck_url, headers=headers, timeout=5)
-
-        if response.status_code != 200:
+        res = requests.get(f"https://api.rugcheck.xyz/v1/tokens/{token_address}/report/summary", headers=headers, timeout=5)
+        
+        if res.status_code != 200:
             return jsonify({"score": 0, "risk": "UNKNOWN", "summary": "Token too new."})
 
-        rc_data = response.json()
-        danger_score = rc_data.get('score', 0)
-        safety_score = max(0, min(100, 100 - int(danger_score / 100)))
+        rc = res.json()
+        score = max(0, min(100, 100 - int(rc.get('score', 0) / 100)))
+        risk = "SAFE" if score >= 80 else "WARNING" if score >= 50 else "CRITICAL"
         
-        risk_label = "SAFE"
-        if safety_score < 50: risk_label = "CRITICAL"
-        elif safety_score < 80: risk_label = "WARNING"
-
-        risks = rc_data.get('risks', [])
-        summary = "Clean Analysis." if not risks else f"ALERT: {risks[0].get('name')}."
-
-        return jsonify({"score": safety_score, "risk": risk_label, "summary": summary})
+        return jsonify({"score": score, "risk": risk, "summary": "Scan complete."})
     except:
         return jsonify({"risk": "ERROR", "score": 0}), 500
 
@@ -89,58 +74,77 @@ def submit_report():
         data['id'] = int(time.time() * 1000)
         data['status'] = 'pending'
         global_reports.insert(0, data)
-        save_json(DB_FILE, global_reports) 
-        return jsonify({"status": "success", "id": data['id']})
-    except Exception as e: return jsonify({"error": str(e)}), 500
+        save_json(DB_FILE, global_reports)
+        return jsonify({"status": "success"})
+    except: return jsonify({"error": "Failed"}), 500
 
 @app.route('/report/list', methods=['GET'])
 def get_reports():
     return jsonify(global_reports)
 
+# --- NOUVELLES ROUTES SÉCURISÉES (ADMIN) ---
+
+# 1. LOGIN SÉCURISÉ
+@app.route('/admin/login', methods=['POST'])
+def admin_login():
+    data = request.json
+    # Le serveur vérifie le mot de passe ici (invisible pour les hackers)
+    if data.get('password') == ADMIN_PASSWORD:
+        return jsonify({"success": True, "token": ADMIN_TOKEN})
+    else:
+        return jsonify({"success": False, "error": "Invalid Password"}), 401
+
+# 2. ACTIONS SÉCURISÉES (Nécessite le token)
 @app.route('/report/action', methods=['POST'])
 def action_report():
-    try:
-        req = request.json
-        action = req.get('action')
-        report_id = req.get('id')
-        global global_reports
-        updated = False
-        
-        if action == 'delete':
-            global_reports = [r for r in global_reports if r['id'] != report_id]
-            updated = True
-        elif action == 'approve':
-            for r in global_reports:
-                if r['id'] == report_id: 
-                    r['status'] = 'approved'
-                    updated = True
-        
-        if updated: save_json(DB_FILE, global_reports) 
-        return jsonify({"status": "updated"})
-    except: return jsonify({"error": "Failed"}), 500
+    data = request.json
+    # VÉRIFICATION DU TOKEN
+    if data.get('token') != ADMIN_TOKEN:
+        return jsonify({"error": "Unauthorized"}), 403
 
-# --- ROUTES REFERRAL ---
+    action = data.get('action')
+    r_id = data.get('id')
+    global global_reports
+    
+    if action == 'delete':
+        global_reports = [r for r in global_reports if r['id'] != r_id]
+    elif action == 'approve':
+        for r in global_reports:
+            if r['id'] == r_id: r['status'] = 'approved'
+            
+    save_json(DB_FILE, global_reports)
+    return jsonify({"status": "updated"})
 
-# 1. Enregistrer un parrainage (Appelé par le site quand quelqu'un arrive)
+# 3. PAIEMENT REFERRAL SÉCURISÉ
+@app.route('/referral/pay', methods=['POST'])
+def pay_referral():
+    data = request.json
+    if data.get('token') != ADMIN_TOKEN:
+        return jsonify({"error": "Unauthorized"}), 403
+        
+    target = data.get('referrerWallet')
+    for ref in global_referrals:
+        if ref.get('referrerWallet') == target:
+            ref['paid'] = True
+            
+    save_json(REF_FILE, global_referrals)
+    return jsonify({"status": "paid"})
+
+@app.route('/referral/list', methods=['GET'])
+def list_referrals():
+    return jsonify(global_referrals)
+
 @app.route('/referral/track', methods=['POST'])
 def track_referral():
     try:
         data = request.json
         data['server_time'] = datetime.now().isoformat()
-        
+        if 'paid' not in data: data['paid'] = False
         global_referrals.append(data)
         save_json(REF_FILE, global_referrals)
-        
         return jsonify({"status": "tracked"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# 2. Lister les parrainages (NOUVEAU - Pour l'onglet Admin)
-@app.route('/referral/list', methods=['GET'])
-def get_referral_list():
-    return jsonify(global_referrals), 200
+    except: return jsonify({"error": "Failed"}), 500
 
 if __name__ == '__main__':
-    # Utilise le port défini par Render ou 10000 par défaut
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
