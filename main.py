@@ -46,6 +46,7 @@ global_referrals = load_json(REF_FILE)
 def home():
     return jsonify({"status": "ONLINE", "reports": len(global_reports)})
 
+# --- SCANNER INTELLIGENT (ALGORITHME V4) ---
 @app.route('/scan', methods=['POST'])
 def scan_token():
     try:
@@ -53,18 +54,58 @@ def scan_token():
         token_address = data.get('address')
         if not token_address: return jsonify({"risk": "ERROR", "score": 0}), 400
 
+        # 1. CHECK DATABASE (BLACKLIST COMMUNAUTAIRE)
+        # Si un utilisateur a rapporté ce token et que l'admin l'a approuvé, c'est SCAM direct.
+        for report in global_reports:
+            if report.get('target') == token_address and report.get('status') == 'approved':
+                return jsonify({
+                    "score": 0, 
+                    "risk": "CRITICAL", 
+                    "summary": "🚨 BLACKLISTED: Reported by Solana Gold Guard Community as a SCAM."
+                })
+
+        # 2. APPEL API EXTERNE (RUGCHECK)
         headers = {"User-Agent": "Mozilla/5.0"}
         res = requests.get(f"https://api.rugcheck.xyz/v1/tokens/{token_address}/report/summary", headers=headers, timeout=5)
-        
-        if res.status_code != 200:
-            return jsonify({"score": 0, "risk": "UNKNOWN", "summary": "Token too new."})
 
-        rc = res.json()
-        score = max(0, min(100, 100 - int(rc.get('score', 0) / 100)))
-        risk = "SAFE" if score >= 80 else "WARNING" if score >= 50 else "CRITICAL"
+        if res.status_code != 200:
+            return jsonify({"score": 0, "risk": "UNKNOWN", "summary": "Token too new or not found."})
+
+        rc_data = res.json()
         
-        return jsonify({"score": score, "risk": risk, "summary": "Scan complete."})
-    except:
+        # Calcul du score de base
+        danger_score = rc_data.get('score', 0)
+        safety_score = max(0, min(100, 100 - int(danger_score / 100)))
+
+        # 3. ANALYSE HEURISTIQUE (DETECTION PHISHING)
+        token_meta = rc_data.get('tokenMeta', {})
+        token_name = token_meta.get('name', '').lower()
+        
+        # Mots-clés souvent utilisés par les drainers
+        suspicious_keywords = ['claim', 'reward', 'airdrop', 'stakin', 'migrat', 'support', 'v2', 'gift', 'ledger', 'wallet']
+        
+        is_suspicious_name = any(word in token_name for word in suspicious_keywords)
+        
+        summary = "Clean Analysis."
+        risks = rc_data.get('risks', [])
+        
+        if risks:
+            summary = f"ALERT: {risks[0].get('name')}."
+        
+        # Si le nom est suspect, on force un score bas même si la liquidité est ok
+        if is_suspicious_name:
+            safety_score = min(safety_score, 40) # On cap le score à 40 max
+            summary = f"SUSPICIOUS NAME DETECTED ('{token_name}'). Possible Phishing/Drainer."
+
+        # Label final
+        risk_label = "SAFE"
+        if safety_score < 50: risk_label = "CRITICAL"
+        elif safety_score < 80: risk_label = "WARNING"
+
+        return jsonify({"score": safety_score, "risk": risk_label, "summary": summary})
+        
+    except Exception as e:
+        print(f"Scan Error: {e}")
         return jsonify({"risk": "ERROR", "score": 0}), 500
 
 @app.route('/report/submit', methods=['POST'])
@@ -82,23 +123,19 @@ def submit_report():
 def get_reports():
     return jsonify(global_reports)
 
-# --- NOUVELLES ROUTES SÉCURISÉES (ADMIN) ---
+# --- ROUTES SÉCURISÉES (ADMIN) ---
 
-# 1. LOGIN SÉCURISÉ
 @app.route('/admin/login', methods=['POST'])
 def admin_login():
     data = request.json
-    # Le serveur vérifie le mot de passe ici (invisible pour les hackers)
     if data.get('password') == ADMIN_PASSWORD:
         return jsonify({"success": True, "token": ADMIN_TOKEN})
     else:
         return jsonify({"success": False, "error": "Invalid Password"}), 401
 
-# 2. ACTIONS SÉCURISÉES (Nécessite le token)
 @app.route('/report/action', methods=['POST'])
 def action_report():
     data = request.json
-    # VÉRIFICATION DU TOKEN
     if data.get('token') != ADMIN_TOKEN:
         return jsonify({"error": "Unauthorized"}), 403
 
@@ -115,7 +152,6 @@ def action_report():
     save_json(DB_FILE, global_reports)
     return jsonify({"status": "updated"})
 
-# 3. PAIEMENT REFERRAL SÉCURISÉ
 @app.route('/referral/pay', methods=['POST'])
 def pay_referral():
     data = request.json
