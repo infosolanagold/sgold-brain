@@ -1,8 +1,9 @@
-Flask==3.0.0
-flask-cors==4.0.0
-requests==2.31.0
-solana==0.30.0
-solders>=0.18.0
-numpy>=1.24.0,<2.0.0
-torch==2.2.0+cpu --extra-index-url https://download.pytorch.org/whl/cpu
-gunicorn==21.2.0
+Flask
+flask-cors
+requests
+gunicorn
+numpy
+# On retire les versions strictes pour éviter les conflits
+solana
+solders
+torch --extra-index-url https://download.pytorch.org/whl/cpu
