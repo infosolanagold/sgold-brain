@@ -214,3 +214,70 @@ def scan_token():
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
+# --- NOUVELLE ROUTE GROK-ENHANCED (isolée) ---
+@app.route('/grok-scan', methods=['POST'])
+def grok_scan():
+    try:
+        data = request.json
+        token_address = data.get('address')
+        if not token_address:
+            return jsonify({"risk": "ERROR", "score": 0, "grok_message": "No address provided! 🛑"}), 400
+
+        # Réutilise la logique existante de /scan (sans la dupliquer)
+        # On simule un appel interne à la logique de scan
+        # (Tu peux refactor plus tard pour éviter la duplication)
+
+        # 1. RugCheck (comme dans ton code)
+        headers = {"User-Agent": "Mozilla/5.0"}
+        res = requests.get(f"https://api.rugcheck.xyz/v1/tokens/{token_address}/report/summary", headers=headers, timeout=5)
+        if res.status_code != 200:
+            return jsonify({
+                "score": 0,
+                "risk": "UNKNOWN",
+                "summary": "Token too new or not found.",
+                "grok_message": "Grok says: This token is too fresh... or too hidden. Suspicious? 😏"
+            })
+
+        rc_data = res.json()
+        danger_score = rc_data.get('score', 0)
+        safety_score = max(0, min(100, 100 - int(danger_score / 100)))
+
+        # 2. Heuristique + on-chain (comme ton code)
+        suspicious_keywords = ['claim', 'reward', 'airdrop', 'stakin', 'migrat', 'support', 'v2', 'gift', 'ledger', 'wallet', 'drainer', 'rug', 'honeypot', 'scam']
+        token_name = rc_data.get('tokenMeta', {}).get('name', '').lower()
+        is_suspicious_name = any(word in token_name for word in suspicious_keywords)
+        if is_suspicious_name:
+            safety_score = min(safety_score, 40)
+
+        # 3. On-chain (tx count, etc.)
+        try:
+            pubkey = PublicKey(token_address)
+            signatures = client.get_signatures_for_address(pubkey, limit=10).value
+            tx_count = len(signatures) if signatures else 0
+            if tx_count < 5:
+                safety_score -= 40
+        except:
+            tx_count = 0
+            safety_score -= 30
+
+        # 4. Grok AI boost (simple mais fun)
+        grok_insight = ""
+        if safety_score > 80:
+            grok_insight = "Grok approves: This looks clean. Ape responsibly! 🚀"
+        elif safety_score > 50:
+            grok_insight = "Grok says: Meh... some red flags, but not screaming scam. DYOR hard."
+        else:
+            grok_insight = "Grok warns: High rug probability. Run away! ☠️"
+
+        return jsonify({
+            "score": safety_score,
+            "risk": "CRITICAL" if safety_score < 30 else "WARNING" if safety_score < 70 else "SAFE",
+            "summary": rc_data.get('risks', [{}])[0].get('name', 'No major risks detected'),
+            "grok_insight": grok_insight,
+            "tx_count": tx_count,
+            "powered_by": "Grok x SolanaGoldGuard"
+        })
+
+    except Exception as e:
+        logging.error(f"Grok Scan Error: {e}")
+        return jsonify({"risk": "ERROR", "score": 0, "grok_message": "Grok encountered a glitch... try again later! 🤖"}), 500
