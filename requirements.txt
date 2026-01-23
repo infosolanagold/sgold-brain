@@ -1,9 +1,9 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
 Flask
 flask-cors
 requests
 gunicorn
 numpy
-# On retire les versions strictes pour éviter les conflits
 solana
 solders
-torch --extra-index-url https://download.pytorch.org/whl/cpu
+torch
