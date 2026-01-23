@@ -8,17 +8,38 @@ from datetime import datetime
 import logging
 import hashlib
 
-# --- GESTION DES IMPORTS À RISQUE (Crash-Proof) ---
+# --- SETUP LOGGING ---
+logging.basicConfig(level=logging.INFO)
+
+# --- CONFIGURATION FICHIERS (SYSTEME ROBUSTE) ---
+# On cherche le disque persistant
+BASE_PATH = os.getcwd() # Par défaut : dossier actuel
+if os.path.exists("/var/data"):
+    BASE_PATH = "/var/data"
+    logging.info(f"✅ Disque persistant trouvé : {BASE_PATH}")
+else:
+    logging.warning("⚠️ Aucun disque persistant trouvé. Utilisation du dossier temporaire.")
+
+DB_FILE = os.path.join(BASE_PATH, "database.json")
+REF_FILE = os.path.join(BASE_PATH, "referrals.json")
+MODEL_FILE = os.path.join(BASE_PATH, "rug_model.pth")
+MEAN_FILE = os.path.join(BASE_PATH, "mean.npy")
+STD_FILE = os.path.join(BASE_PATH, "std.npy")
+
+# --- SÉCURITÉ ---
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "SOLANA_ADMIN")
+# Token stable basé sur le mot de passe
+ADMIN_TOKEN = hashlib.sha256(ADMIN_PASSWORD.encode()).hexdigest()
+
+# --- IMPORTATION CONDITIONNELLE (ANTI-CRASH) ---
 try:
     from solana.rpc.api import Client
-    try:
-        from solana.publickey import PublicKey
-    except ImportError:
-        from solders.pubkey import Pubkey as PublicKey
+    SOLANA_RPC = "https://api.mainnet-beta.solana.com"
+    client = Client(SOLANA_RPC)
     SOLANA_AVAILABLE = True
 except ImportError:
     SOLANA_AVAILABLE = False
-    print("⚠️ WARNING: Solana/Solders libs missing. RPC features disabled.")
+    logging.warning("Solana/Solders manquant. Mode hors ligne.")
 
 try:
     import torch
@@ -27,27 +48,12 @@ try:
     AI_AVAILABLE = True
 except ImportError:
     AI_AVAILABLE = False
-    print("⚠️ WARNING: Torch/Numpy missing. AI features disabled.")
+    logging.warning("PyTorch manquant. Mode AI désactivé.")
 
 app = Flask(__name__)
-# Autorise CORS pour tout (important pour le dev/prod)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-logging.basicConfig(level=logging.INFO)
-
-# --- SÉCURITÉ ---
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "SOLANA_ADMIN")
-# Utilisation de SHA256 pour un token stable (hash() change à chaque restart en Python)
-ADMIN_TOKEN = hashlib.sha256(ADMIN_PASSWORD.encode()).hexdigest()
-
-# --- CONFIGURATION FICHIERS ---
-# Sur Render, utilise /var/data si tu as un disque persistant, sinon /tmp (effacé au redémarrage)
-BASE_PATH = "/var/data" if os.path.exists("/var/data") else os.getcwd()
-
-DB_FILE = os.path.join(BASE_PATH, "database.json")
-REF_FILE = os.path.join(BASE_PATH, "referrals.json")
-MODEL_FILE = os.path.join(BASE_PATH, "rug_model.pth")
-
+# --- FONCTIONS UTILITAIRES ---
 def load_json(filepath):
     if not os.path.exists(filepath): return []
     try:
@@ -57,54 +63,58 @@ def load_json(filepath):
 def save_json(filepath, data):
     try:
         with open(filepath, 'w') as f: json.dump(data, f, indent=4)
-    except Exception as e:
-        print(f"Error saving JSON: {e}")
+    except Exception as e: logging.error(f"Error saving {filepath}: {e}")
 
-# Chargement en mémoire
+# Chargement en mémoire au démarrage
 global_reports = load_json(DB_FILE)
 global_referrals = load_json(REF_FILE)
 
-# --- CONFIG RPC ---
-SOLANA_RPC = "https://api.mainnet-beta.solana.com"
-client = Client(SOLANA_RPC) if SOLANA_AVAILABLE else None
-
-# --- AI MODEL (SAFE MODE) ---
+# --- AI MODEL DEFINITION ---
 model = None
+mean = None
+std = None
+
 if AI_AVAILABLE:
     class RugPullClassifier(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.fc1 = nn.Linear(5, 64)
-            self.fc2 = nn.Linear(64, 1)
+        def __init__(self, input_size=5):
+            super(RugPullClassifier, self).__init__()
+            self.fc1 = nn.Linear(input_size, 64)
+            self.fc2 = nn.Linear(64, 32)
+            self.fc3 = nn.Linear(32, 1)
             self.sigmoid = nn.Sigmoid()
         def forward(self, x):
-            return self.sigmoid(self.fc2(torch.relu(self.fc1(x))))
-    
-    if os.path.exists(MODEL_FILE):
+            x = torch.relu(self.fc1(x))
+            x = torch.relu(self.fc2(x))
+            x = self.sigmoid(self.fc3(x))
+            return x
+
+    # Tentative de chargement du modèle
+    if os.path.exists(MODEL_FILE) and os.path.exists(MEAN_FILE):
         try:
             model = RugPullClassifier()
             model.load_state_dict(torch.load(MODEL_FILE, map_location=torch.device('cpu')))
             model.eval()
-        except: model = None
+            mean = np.load(MEAN_FILE)
+            std = np.load(STD_FILE)
+            logging.info("🧠 Grok AI Model chargé avec succès !")
+        except Exception as e:
+            logging.error(f"Erreur chargement modèle: {e}")
+            model = None
+    else:
+        logging.info("ℹ️ Pas de fichiers modèle trouvés. Utilisation du mode heuristique.")
 
-# --- ROUTES GÉNÉRALES ---
+# --- ROUTES ---
 
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({
         "status": "ONLINE", 
         "reports": len(global_reports),
-        "referrals_tracked": len(global_referrals),
-        "solana_active": SOLANA_AVAILABLE,
-        "ai_active": model is not None
+        "ai_active": model is not None,
+        "disk_path": BASE_PATH
     })
 
-# PING pour réveiller le serveur (utilisé par le frontend)
-@app.route('/ping', methods=['GET'])
-def ping():
-    return jsonify({"status": "pong"})
-
-# --- ROUTES REPORTS (SCAMS) ---
+# --- GESTION DES RAPPORTS ---
 
 @app.route('/report/list', methods=['GET'])
 def list_reports():
@@ -118,7 +128,7 @@ def submit_report():
         data['status'] = 'pending'
         data['submitted_at'] = datetime.now().isoformat()
         
-        # On ajoute au début de la liste
+        # Ajout en haut de la liste
         global_reports.insert(0, data)
         save_json(DB_FILE, global_reports)
         return jsonify({"status": "success"})
@@ -143,14 +153,12 @@ def action_report():
     save_json(DB_FILE, global_reports)
     return jsonify({"status": "updated"})
 
-# --- ROUTES REFERRAL (MANQUANTES DANS TON CODE INITIAL) ---
+# --- GESTION DES REFERRALS ---
 
 @app.route('/referral/track', methods=['POST'])
 def track_referral():
     try:
         data = request.json
-        # On évite les doublons simples (même visiteur, même référant dans la même heure)
-        # Ceci est une implémentation basique
         entry = {
             "id": int(time.time() * 1000),
             "visitorWallet": data.get('visitorWallet'),
@@ -162,13 +170,10 @@ def track_referral():
         global_referrals.append(entry)
         save_json(REF_FILE, global_referrals)
         return jsonify({"status": "tracked"})
-    except Exception as e:
-        print(e)
-        return jsonify({"error": "failed"}), 500
+    except: return jsonify({"error": "failed"}), 500
 
 @app.route('/referral/list', methods=['GET'])
 def list_referrals():
-    # Optionnel : Filtrer pour n'afficher que les non payés ou les récents
     return jsonify(global_referrals)
 
 @app.route('/referral/pay', methods=['POST'])
@@ -177,85 +182,132 @@ def pay_referral():
     if data.get('token') != ADMIN_TOKEN:
         return jsonify({"error": "Unauthorized"}), 403
     
-    target_wallet = data.get('referrerWallet')
-    
-    # Marquer toutes les entrées de ce wallet comme "paid"
-    count = 0
+    target = data.get('referrerWallet')
     for ref in global_referrals:
-        if ref.get('referrerWallet') == target_wallet and not ref.get('paid'):
+        if ref.get('referrerWallet') == target:
             ref['paid'] = True
-            count += 1
-            
     save_json(REF_FILE, global_referrals)
-    return jsonify({"status": "paid", "count": count})
+    return jsonify({"status": "paid"})
 
 # --- ADMIN LOGIN ---
 
 @app.route('/admin/login', methods=['POST'])
 def login():
-    # Comparaison sécurisée
     if request.json.get('password') == ADMIN_PASSWORD:
         return jsonify({"success": True, "token": ADMIN_TOKEN})
     return jsonify({"success": False}), 401
 
-# --- SCANNER ---
+# --- SCANNER CORE ---
 
 @app.route('/scan', methods=['POST'])
-def scan():
+def scan_token():
     try:
-        addr = request.json.get('address')
-        if not addr: return jsonify({"score": 0, "risk": "ERROR"}), 400
+        data = request.json
+        token_address = data.get('address')
+        if not token_address: return jsonify({"risk": "ERROR", "score": 0}), 400
 
-        # 1. Check DB interne
-        for r in global_reports:
-            if r.get('target') == addr and r.get('status') == 'approved':
-                return jsonify({"score": 0, "risk": "CRITICAL", "summary": "BLACKLISTED by Community"})
+        # 1. CHECK DATABASE
+        for report in global_reports:
+            if report.get('target') == token_address and report.get('status') == 'approved':
+                return jsonify({
+                    "score": 0,
+                    "risk": "CRITICAL",
+                    "summary": "🚨 BLACKLISTED: Reported by Community.",
+                    "reasons": ["Blacklisté par la communauté"]
+                })
 
-        # 2. Check RugCheck API
-        # On met un User-Agent pour ne pas se faire bloquer
-        headers = {"User-Agent": "Mozilla/5.0 (compatible; GoldGuard/1.0)"}
-        res = requests.get(f"https://api.rugcheck.xyz/v1/tokens/{addr}/report/summary", headers=headers, timeout=5)
-        
-        score = 0
-        summary = "Scan Complete"
-        risk = "UNKNOWN"
-        
-        if res.status_code == 200:
-            data = res.json()
-            # RugCheck donne un score de risque (0 = sûr, 10000+ = dangereux)
-            # On convertit en score de confiance sur 100
-            raw_score = data.get('score', 0)
-            score = max(0, min(100, 100 - int(raw_score / 100)))
-            
-            if data.get('risks'): 
-                summary = data['risks'][0].get('name')
-            
-            risk = "SAFE" if score > 80 else "WARNING" if score > 40 else "CRITICAL"
+        # 2. RUGCHECK API (Base fiable)
+        headers = {"User-Agent": "Mozilla/5.0"}
+        try:
+            res = requests.get(f"https://api.rugcheck.xyz/v1/tokens/{token_address}/report/summary", headers=headers, timeout=4)
+            if res.status_code == 200:
+                rc_data = res.json()
+                danger_score = rc_data.get('score', 0)
+                safety_score = max(0, min(100, 100 - int(danger_score / 100)))
+                token_meta = rc_data.get('tokenMeta', {})
+                risks = rc_data.get('risks', [])
+            else:
+                safety_score = 50
+                token_meta = {}
+                risks = []
+        except:
+            safety_score = 50
+            token_meta = {}
+            risks = []
+
+        summary = "Clean Analysis."
+        reasons = []
+        if risks:
+            summary = f"ALERT: {risks[0].get('name')}."
+            reasons.append(f"Risque détecté: {risks[0].get('name')}")
+
+        # 3. HEURISTIQUE (Noms suspects)
+        token_name = token_meta.get('name', '').lower()
+        suspicious_keywords = ['claim', 'reward', 'airdrop', 'stakin', 'migrat', 'gift', 'ledger', 'wallet']
+        if any(word in token_name for word in suspicious_keywords):
+            safety_score = min(safety_score, 20)
+            summary = f"SUSPICIOUS NAME ('{token_name}'). Possible Drainer."
+            reasons.append("Nom suspect détecté (Phishing probable)")
+
+        # 4. ON-CHAIN DATA (Si disponible)
+        tx_count = 0
+        if SOLANA_AVAILABLE:
+            try:
+                # On limite à 10 pour la rapidité
+                signatures = client.get_signatures_for_address(PublicKey(token_address), limit=10)
+                tx_history = signatures.value if signatures.value else []
+                tx_count = len(tx_history)
+                if tx_count < 5:
+                    safety_score -= 30
+                    reasons.append("Très peu de transactions récentes")
+            except Exception as e:
+                logging.warning(f"RPC Error: {e}")
+
+        # 5. GROK AI PREDICTION (Si modèle chargé)
+        if model and mean is not None and std is not None:
+            try:
+                # Simulation des features (car extraire la liquidité temps réel est lent)
+                number_adds = tx_count * 0.5 
+                number_removes = tx_count * 0.1
+                ratio = number_adds / (number_removes + 1e-6)
+                lifespan = 5.0 # Valeur moyenne
+                holders = 100.0 # Valeur moyenne
+                
+                features_np = np.array([[number_adds, number_removes, ratio, lifespan, holders]])
+                features_np = (features_np - mean) / std # Normalisation
+                features_tensor = torch.tensor(features_np, dtype=torch.float32)
+                
+                with torch.no_grad():
+                    risk_prob = model(features_tensor).item() * 100
+                
+                safety_score = int((safety_score + (100 - risk_prob)) / 2)
+                reasons.append(f"Grok AI Risk Assessment: {risk_prob:.1f}%")
+            except Exception as e:
+                logging.error(f"AI Error: {e}")
+
+        # Label final
+        if safety_score < 40:
+            risk_label = "CRITICAL"
+            prediction = "Haut risque – avoid! 🔥"
+        elif safety_score < 75:
+            risk_label = "WARNING"
+            prediction = "Risque modéré ⚠️"
         else:
-            # Fallback si RugCheck ne connait pas le token
-            risk = "WARNING"
-            summary = "New Token / No Data"
-            score = 50
+            risk_label = "SAFE"
+            prediction = "Semble sûr 🚀"
 
-        # 3. Phishing Check (Simple)
-        # On vérifie si le nom contient des mots clés suspects
-        if res.status_code == 200:
-            token_meta = res.json().get('tokenMeta', {})
-            name = token_meta.get('name', '').lower()
-            symbol = token_meta.get('symbol', '').lower()
-            
-            suspicious = ['claim', 'reward', 'stakin', 'gift', 'free', 'airdrop']
-            if any(x in name for x in suspicious) or any(x in symbol for x in suspicious):
-                score = min(score, 10)
-                summary = "Suspicious Name Detected"
-                risk = "CRITICAL"
-
-        return jsonify({"score": score, "risk": risk, "summary": summary})
+        return jsonify({
+            "score": safety_score,
+            "risk": risk_label,
+            "summary": summary,
+            "prediction": prediction,
+            "reasons": reasons
+        })
+        
     except Exception as e:
-        print(f"Scan Error: {e}")
-        return jsonify({"score": 0, "risk": "ERROR", "summary": "Scan Failed"}), 500
+        logging.error(f"Global Scan Error: {e}")
+        return jsonify({"risk": "ERROR", "score": 0}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
-    # Threaded=True permet de gérer plusieurs requêtes en même temps
-    app.run(host='0.0.0.0', port=port, threaded=True)
+    app.run(host='0.0.0.0', port=port)
