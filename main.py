@@ -181,7 +181,7 @@ def scan_token():
         # ÉTAPE 2 : Interroger l'API RugCheck (Timeout 15s)
         try:
             headers = {"User-Agent": "Mozilla/5.0"}
-            api_url = f"https://api.rugcheck.xyz/v1/tokens/{token_address}/report/summary"
+            api_url = f"https://api.rugcheck.xyz/v1/tokens/{token_address}/report"
             res = requests.get(api_url, headers=headers, timeout=15)
             
             if res.status_code == 200:
