@@ -30,30 +30,26 @@ DB_FILE = os.path.join(BASE_PATH, "database.json")
 REF_FILE = os.path.join(BASE_PATH, "referrals.json")
 
 # --- FONCTIONS DE BASE DE DONNÉES ---
-def load_data():
-    if os.path.exists(DB_FILE):
+def load_data(filepath):
+    if os.path.exists(filepath):
         try:
-            with open(DB_FILE, 'r') as f:
+            with open(filepath, 'r') as f:
                 return json.load(f)
         except Exception as e:
-            logging.error(f"Erreur lecture DB: {e}")
+            logging.error(f"Erreur lecture fichier {filepath}: {e}")
             return []
     return []
 
-def save_data(data):
+def save_data(filepath, data):
     try:
-        with open(DB_FILE, 'w') as f:
+        with open(filepath, 'w') as f:
             json.dump(data, f, indent=4)
     except Exception as e:
-        logging.error(f"Erreur sauvegarde DB: {e}")
+        logging.error(f"Erreur sauvegarde fichier {filepath}: {e}")
 
 # Chargement au démarrage
-global_reports = load_data()
-global_referrals = []
-if os.path.exists(REF_FILE):
-    try:
-        with open(REF_FILE, 'r') as f: global_referrals = json.load(f)
-    except: pass
+global_reports = load_data(DB_FILE)
+global_referrals = load_data(REF_FILE)
 
 # --- ROUTES PRINCIPALES ---
 
@@ -63,7 +59,7 @@ def home():
         "status": "ONLINE",
         "reports_count": len(global_reports),
         "storage_mode": "PERSISTENT" if BASE_PATH == "/var/data" else "TEMPORARY",
-        "scan_engine": "ACTIVE (STRICT & DETAILED)"
+        "scan_engine": "ACTIVE (STRICT, DETAILED & ENGLISH)"
     })
 
 # --- GESTION DES RAPPORTS (DATABASE) ---
@@ -87,7 +83,7 @@ def submit_report():
         }
         
         global_reports.insert(0, new_report)
-        save_data(global_reports)
+        save_data(DB_FILE, global_reports)
         
         return jsonify({"status": "success"})
     except Exception as e:
@@ -115,131 +111,9 @@ def action_report():
                 modified = True
     
     if modified:
-        save_data(global_reports)
+        save_data(DB_FILE, global_reports)
         
     return jsonify({"status": "updated"})
-
-
-# --- MOTEUR DE SCAN (SCANNER LOGIC - STRICT & DÉTAILLÉ) ---
-
-@app.route('/scan', methods=['POST'])
-def scan_token():
-    try:
-        data = request.json
-        token_address = data.get('address')
-        
-        if not token_address:
-            return jsonify({"risk": "ERROR", "score": 0, "summary": "No address provided"}), 400
-
-        # ÉTAPE 1 : Vérifier la Blacklist locale
-        for report in global_reports:
-            if report.get('target') == token_address and report.get('status') == 'approved':
-                return jsonify({
-                    "score": 0,
-                    "risk": "CRITICAL",
-                    "summary": "🚨 BLACKLISTED: Known Scam",
-                    "details": ["⚠️ Ce token a été signalé et confirmé comme une fraude par la communauté Solana Gold Guard."]
-                })
-
-        # ÉTAPE 2 : Interroger l'API RugCheck avec analyse poussée
-        try:
-            headers = {"User-Agent": "Mozilla/5.0"}
-            api_url = f"https://api.rugcheck.xyz/v1/tokens/{token_address}/report/summary"
-            res = requests.get(api_url, headers=headers, timeout=5)
-            
-            if res.status_code == 200:
-                rc_data = res.json()
-                danger_score = rc_data.get('score', 0) 
-                safety_score = max(0, 100 - danger_score)
-                
-                risks = rc_data.get('risks', [])
-                summary = "Analyse terminée"
-                
-                # LA VIANDE (Analyse détaillée)
-                detailed_analysis = []
-                
-                if risks:
-                    summary = "Problèmes critiques détectés"
-                    
-                    for risk in risks:
-                        r_name = risk.get('name', '').lower()
-                        r_desc = risk.get('description', '').lower()
-                        r_combined = r_name + " " + r_desc
-
-                        # 💧 LIQUIDITÉ
-                        if 'liquidity' in r_combined or 'lp' in r_combined:
-                            if 'low' in r_combined or 'unlocked' in r_combined:
-                                safety_score -= 40
-                                if "💧 Liquidité Faible/Non-Verrouillée : Les développeurs n'ont pas bloqué les fonds. Ils peuvent retirer l'argent (Rug Pull) à n'importe quel moment." not in detailed_analysis:
-                                    detailed_analysis.append("💧 Liquidité Faible/Non-Verrouillée : Les développeurs n'ont pas bloqué les fonds. Ils peuvent retirer l'argent (Rug Pull) à n'importe quel moment.")
-
-                        # 🖨️ MINT AUTHORITY
-                        if 'mint' in r_combined and 'authority' in r_combined:
-                            safety_score -= 60
-                            if "🖨️ Mint Authority Actif : Le créateur a gardé le droit d'imprimer de nouveaux tokens à l'infini, ce qui détruira la valeur de votre investissement." not in detailed_analysis:
-                                detailed_analysis.append("🖨️ Mint Authority Actif : Le créateur a gardé le droit d'imprimer de nouveaux tokens à l'infini, ce qui détruira la valeur de votre investissement.")
-
-                        # 🧊 FREEZE AUTHORITY
-                        if 'freeze' in r_combined and 'authority' in r_combined:
-                            safety_score -= 60
-                            if "🧊 Freeze Authority Actif (HONEYPOT) : Vous pouvez acheter ce token, mais le contrat permet au créateur de geler votre portefeuille pour vous empêcher de revendre." not in detailed_analysis:
-                                detailed_analysis.append("🧊 Freeze Authority Actif (HONEYPOT) : Vous pouvez acheter ce token, mais le contrat permet au créateur de geler votre portefeuille pour vous empêcher de revendre.")
-
-                        # 🐋 WHALES
-                        if 'top holders' in r_combined or 'concentration' in r_combined:
-                            safety_score -= 25
-                            if "🐋 Concentration des Whales : Une quantité dangereuse de tokens est détenue par très peu de portefeuilles. S'ils décident de vendre, le prix s'effondrera." not in detailed_analysis:
-                                detailed_analysis.append("🐋 Concentration des Whales : Une quantité dangereuse de tokens est détenue par très peu de portefeuilles. S'ils décident de vendre, le prix s'effondrera.")
-                
-                # 🎣 PHISHING
-                meta = rc_data.get('tokenMeta', {})
-                token_name = meta.get('name', '').lower()
-                if any(x in token_name for x in ['claim', 'reward', 'stakin', 'gift', 'v2', 'airdrop']):
-                    safety_score = min(safety_score, 25)
-                    detailed_analysis.append("🎣 Nom Trompeur (Phishing) : Le nom de ce token utilise des mots-clés d'arnaque typiques pour vous inciter à connecter votre portefeuille.")
-
-                # Sécuriser le score entre 0 et 100
-                safety_score = max(0, min(100, safety_score))
-                
-                # Token clean
-                if safety_score >= 85 and not detailed_analysis:
-                    detailed_analysis.append("✅ Aucun signal d'alarme majeur détecté. Le contrat semble propre. (DYOR)")
-
-                # Paliers stricts
-                if safety_score < 50:
-                    risk_label = "CRITICAL"
-                elif safety_score < 85:
-                    risk_label = "WARNING"
-                else:
-                    risk_label = "SAFE"
-                    summary = "Token propre"
-
-                return jsonify({
-                    "score": safety_score,
-                    "risk": risk_label,
-                    "summary": summary,
-                    "details": detailed_analysis,
-                    "reasons": [r.get('name', 'Unknown') for r in risks][:4] 
-                })
-            else:
-                return jsonify({
-                    "score": 50,
-                    "risk": "UNKNOWN",
-                    "summary": "Token trop récent ou introuvable.",
-                    "details": ["🕵️ Le token est trop récent pour avoir un historique ou l'API n'a pas pu l'analyser."]
-                })
-
-        except Exception as e:
-            return jsonify({
-                "score": 50, 
-                "risk": "UNKNOWN", 
-                "summary": "Erreur de connexion",
-                "details": ["⚠️ Impossible de se connecter au moteur de scan externe."]
-            })
-
-    except Exception as e:
-        return jsonify({"risk": "ERROR", "score": 0}), 500
-
 
 # --- REFERRALS & ADMIN LOGIN ---
 
@@ -261,11 +135,7 @@ def track_referral():
             "paid": False
         }
         global_referrals.append(entry)
-        
-        try:
-            with open(REF_FILE, 'w') as f: json.dump(global_referrals, f, indent=4)
-        except: pass
-        
+        save_data(REF_FILE, global_referrals)
         return jsonify({"status": "tracked"})
     except: return jsonify({"error": "failed"}), 500
 
@@ -282,10 +152,149 @@ def pay_ref():
     for ref in global_referrals:
         if ref.get('referrerWallet') == target: ref['paid'] = True
         
-    try:
-        with open(REF_FILE, 'w') as f: json.dump(global_referrals, f, indent=4)
-    except: pass
+    save_data(REF_FILE, global_referrals)
     return jsonify({"status": "paid"})
+
+
+# --- MOTEUR DE SCAN (SCANNER LOGIC - STRICT, DETAILED & ENGLISH) ---
+
+@app.route('/scan', methods=['POST'])
+def scan_token():
+    try:
+        data = request.json
+        token_address = data.get('address')
+        
+        if not token_address:
+            return jsonify({"risk": "ERROR", "score": 0, "summary": "No address provided"}), 400
+
+        # ÉTAPE 1 : Vérifier la Blacklist locale
+        for report in global_reports:
+            if report.get('target') == token_address and report.get('status') == 'approved':
+                return jsonify({
+                    "score": 0,
+                    "risk": "CRITICAL",
+                    "summary": "🚨 BLACKLISTED: Known Scam",
+                    "details": ["⚠️ This token has been reported and confirmed as a scam by the SGOLD community."],
+                    "stats": {"name": "BLACKLISTED", "symbol": "N/A", "liquidity": "N/A"}
+                })
+
+        # ÉTAPE 2 : Interroger l'API RugCheck (Timeout 15s)
+        try:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            api_url = f"https://api.rugcheck.xyz/v1/tokens/{token_address}/report/summary"
+            res = requests.get(api_url, headers=headers, timeout=15)
+            
+            if res.status_code == 200:
+                rc_data = res.json()
+                danger_score = rc_data.get('score', 0) 
+                safety_score = max(0, 100 - danger_score)
+                
+                # --- EXTRACTION DES STATS ---
+                meta = rc_data.get('tokenMeta', {})
+                token_name = meta.get('name', 'Unknown')
+                token_symbol = meta.get('symbol', '???')
+                
+                # Rugcheck donne souvent la liquidité totale dans markets
+                markets = rc_data.get('markets', [])
+                total_lp = sum([m.get('lp', {}).get('lpLockedUSD', 0) for m in markets]) if markets else 0
+                if total_lp == 0: total_lp = rc_data.get('totalMarketLiquidity', 0)
+                
+                formatted_lp = f"${total_lp:,.2f}" if total_lp > 0 else "Unknown / Low"
+
+                stats_data = {
+                    "name": token_name,
+                    "symbol": token_symbol,
+                    "liquidity": formatted_lp
+                }
+                
+                risks = rc_data.get('risks', [])
+                summary = "Scan Complete"
+                
+                # --- THE MEAT AROUND THE BONE (English Details) ---
+                detailed_analysis = []
+                
+                if risks:
+                    summary = "Critical Issues Detected"
+                    
+                    for risk in risks:
+                        r_name = risk.get('name', '').lower()
+                        r_desc = risk.get('description', '').lower()
+                        r_combined = r_name + " " + r_desc
+
+                        # 💧 LIQUIDITY
+                        if 'liquidity' in r_combined or 'lp' in r_combined:
+                            if 'low' in r_combined or 'unlocked' in r_combined:
+                                safety_score -= 40
+                                msg = "💧 Low/Unlocked Liquidity: Developers haven't locked the funds. They can pull the liquidity (Rug Pull) at any time."
+                                if msg not in detailed_analysis: detailed_analysis.append(msg)
+
+                        # 🖨️ MINT AUTHORITY
+                        if 'mint' in r_combined and 'authority' in r_combined:
+                            safety_score -= 60
+                            msg = "🖨️ Mint Authority Active: The creator can print infinite new tokens, instantly destroying the value of your investment."
+                            if msg not in detailed_analysis: detailed_analysis.append(msg)
+
+                        # 🧊 FREEZE AUTHORITY
+                        if 'freeze' in r_combined and 'authority' in r_combined:
+                            safety_score -= 60
+                            msg = "🧊 Freeze Authority Active (HONEYPOT): You can buy, but the contract allows the creator to freeze your wallet and prevent selling."
+                            if msg not in detailed_analysis: detailed_analysis.append(msg)
+
+                        # 🐋 WHALES
+                        if 'top holders' in r_combined or 'concentration' in r_combined:
+                            safety_score -= 25
+                            msg = "🐋 Whale Concentration: A dangerous amount of tokens is held by very few wallets. If they dump, the price will crash."
+                            if msg not in detailed_analysis: detailed_analysis.append(msg)
+                
+                # 🎣 PHISHING
+                if any(x in token_name.lower() for x in ['claim', 'reward', 'stakin', 'gift', 'v2', 'airdrop']):
+                    safety_score = min(safety_score, 25)
+                    detailed_analysis.append("🎣 Deceptive Name (Phishing): This token uses typical scam keywords to trick you into connecting your wallet.")
+
+                # Boundaries
+                safety_score = max(0, min(100, safety_score))
+                
+                # Clean Token
+                if safety_score >= 85 and not detailed_analysis:
+                    detailed_analysis.append("✅ No major red flags detected. The contract looks clean. (DYOR)")
+
+                # Labels
+                if safety_score < 50:
+                    risk_label = "CRITICAL"
+                elif safety_score < 85:
+                    risk_label = "WARNING"
+                else:
+                    risk_label = "SAFE"
+                    summary = "Token looks clean"
+
+                return jsonify({
+                    "score": safety_score,
+                    "risk": risk_label,
+                    "summary": summary,
+                    "details": detailed_analysis,
+                    "stats": stats_data,
+                    "reasons": [r.get('name', 'Unknown') for r in risks][:4] 
+                })
+            else:
+                return jsonify({
+                    "score": 50,
+                    "risk": "UNKNOWN",
+                    "summary": "Token too new or not found.",
+                    "details": ["🕵️ The token is too recent to have a history, or the API couldn't analyze it."],
+                    "stats": {"name": "Unknown", "symbol": "???", "liquidity": "N/A"}
+                })
+
+        except Exception as e:
+            return jsonify({
+                "score": 50, 
+                "risk": "UNKNOWN", 
+                "summary": "Connection Error",
+                "details": ["⚠️ Unable to connect to the external scan engine. Please check if the token address is correct or try again later."],
+                "stats": {"name": "Error", "symbol": "Error", "liquidity": "Error"}
+            })
+
+    except Exception as e:
+        return jsonify({"risk": "ERROR", "score": 0}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
